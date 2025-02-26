@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from slot_tdmpc.models.slot_ae import SlotEncoder, SlotDecoder, SlotDecoder, SlotEncoder
+from slot_tdmpc.models.slot_ae import SlotDecoder, SlotEncoder
 from slot_tdmpc.models.wm_components import *
 from slot_tdmpc.common import math
 from tensordict import TensorDict, TensorDictParams
@@ -13,6 +13,10 @@ class SlotWorldModel(nn.Module):
     def __init__(self, cfg: Dict[str, Any]):
         super(SlotWorldModel, self).__init__()
         self.cfg = cfg
+        self._detach_Qs_params = None
+        self._target_Qs_params = None
+        self._detach_Qs = None
+        self._target_Qs = None
         if cfg.multitask:
             # TODO: can we use something more informative than random embeddings ?
             # ex. maybe we can use embeddings of the goal image as the task embedding
@@ -24,7 +28,7 @@ class SlotWorldModel(nn.Module):
                 self._action_masks[i, :cfg.action_dims[i]] = 1.
 
         # latent model components
-
+        # TODO: need to make slot assignments deterministic, otherwise the latent repr will have random permutations each time
         self._encoder = SlotEncoder(resolution=(64, 64), hid_dim=64, slot_dim=cfg.slot_dim)
         self._decoder = SlotDecoder(hid_dim=64)
 
