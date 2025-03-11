@@ -14,7 +14,7 @@ try:
 except:
 	make_dm_control_env = missing_dependencies
 try:
-	from envs.maniskill import make_env as make_maniskill_env
+	from envs.maniskill3 import make_env as make_maniskill_env
 except:
 	make_maniskill_env = missing_dependencies
 try:

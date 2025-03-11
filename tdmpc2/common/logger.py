@@ -2,6 +2,7 @@ import dataclasses
 import os
 import datetime
 import re
+import torch
 
 import numpy as np
 import pandas as pd
@@ -130,8 +131,8 @@ class Logger:
 		wandb.init(
 			project=self.project,
 			entity=self.entity,
-			name=str(cfg.seed),
-			group=self._group,
+			name=str(cfg.exp_name),
+			group=cfg.wandb_group,
 			tags=cfg_to_group(cfg, return_list=True) + [f"seed:{cfg.seed}"],
 			dir=self._log_dir,
 			config=dataclasses.asdict(cfg),
@@ -173,6 +174,8 @@ class Logger:
 			self._wandb.finish()
 
 	def _format(self, key, value, ty):
+		if isinstance(value, torch.Tensor):
+			value = value.item()
 		if ty == "int":
 			return f'{colored(key+":", "blue")} {int(value):,}'
 		elif ty == "float":

@@ -62,10 +62,11 @@ dropout: 0.01
 simnorm_dim: 8
 
 # logging
-wandb_project: ???
-wandb_entity: ???
+wandb_project: slot-wm
+wandb_entity: qdrl
 wandb_silent: false
 enable_wandb: true
+wandb_group: maniskill
 save_csv: true
 
 # misc
