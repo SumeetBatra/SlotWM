@@ -3,7 +3,7 @@ defaults:
 
 # environment
 task: dog-run
-obs: state
+obs: rgb
 
 # evaluation
 checkpoint: ???
@@ -65,7 +65,7 @@ simnorm_dim: 8
 wandb_project: slot-wm
 wandb_entity: qdrl
 wandb_silent: false
-enable_wandb: true
+enable_wandb: false
 wandb_group: maniskill
 save_csv: true
 
