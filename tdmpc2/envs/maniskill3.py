@@ -3,6 +3,7 @@ import numpy as np
 import mani_skill.envs
 
 from envs.wrappers.timeout import Timeout
+from mani_skill.utils.wrappers import FlattenRGBDObservationWrapper
 
 MANISKILL_TASKS = {
     'pick-cube': dict(

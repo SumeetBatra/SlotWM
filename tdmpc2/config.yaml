@@ -3,7 +3,7 @@ defaults:
 
 # environment
 task: dog-run
-obs: rgb
+obs: state
 
 # evaluation
 checkpoint: ???
