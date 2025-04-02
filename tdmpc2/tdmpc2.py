@@ -247,6 +247,17 @@ class TDMPC2(torch.nn.Module):
 		discount = self.discount[task].unsqueeze(-1) if self.cfg.multitask else self.discount
 		return reward + discount * self.model.Q(next_z, action, task, return_type='min', target=True)
 
+	def _get_recon_loss(self, obs, task):
+		# Reconstruction predictions and loss
+		recon_loss = 0
+		if hasattr(self.model, 'decode'):  # Safety check
+			raw_enc = self.model.encode(obs, task)
+			recon_obs = self.model.decode(raw_enc)
+			target_obs = obs/255  # match timesteps with _zs
+			recon_loss = F.mse_loss(recon_obs, target_obs)  # or other loss like BCE for binary images
+
+		return recon_loss
+	
 	def _update(self, obs, action, reward, task=None):
 		# Compute targets
 		with torch.no_grad():
@@ -272,13 +283,7 @@ class TDMPC2(torch.nn.Module):
 		qs = self.model.Q(_zs, action, task, return_type='all')
 		reward_preds = self.model.reward(_zs, action, task)
 
-
-		# Reconstruction predictions and loss
-		recon_loss = 0
-		if hasattr(self.model, 'decode'):  # Safety check
-			recon_obs = self.model.decode(_zs)
-			target_obs = obs[:-1]/255  # match timesteps with _zs
-			recon_loss = F.mse_loss(recon_obs, target_obs)  # or other loss like BCE for binary images
+		recon_loss = self._get_recon_loss(obs, task)
 
 		# Compute losses
 		reward_loss, value_loss = 0, 0

@@ -61,6 +61,7 @@ task_dim: 96
 num_q: 5
 dropout: 0.01
 simnorm_dim: 8
+slot_ae: False
 
 # logging
 wandb_project: slot-wm

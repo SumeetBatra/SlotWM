@@ -5,7 +5,101 @@ from tensordict import from_modules
 from copy import deepcopy
 
 from einops import rearrange
+from typing import Tuple, List, Dict, Any
+import numpy as np
 
+def build_grid(resolution: Tuple[int, int]):
+	ranges = [np.linspace(0., 1., num=res) for res in resolution]
+	grid = np.meshgrid(*ranges, sparse=False, indexing="ij")
+	grid = np.stack(grid, axis=-1)
+	grid = np.reshape(grid, [resolution[0], resolution[1], -1])
+	grid = np.expand_dims(grid, axis=0)
+	grid = grid.astype(np.float32)
+	return np.concatenate([grid, 1.0 - grid], axis=-1)
+
+class SlotEncoder(nn.Module):
+	def __init__(self, resolution: Tuple[int, int], inp_channel: int, hid_dim: int, slot_dim: int):
+		super().__init__()
+		self.conv = nn.Sequential(
+			nn.Conv2d(inp_channel, hid_dim, 5, padding=2), nn.ReLU(inplace=True),
+			nn.Conv2d(hid_dim, hid_dim, 5, padding=2), nn.ReLU(inplace=True),
+			nn.Conv2d(hid_dim, hid_dim, 5, padding=2), nn.ReLU(inplace=True),
+			nn.Conv2d(hid_dim, hid_dim, 5, padding=2), nn.ReLU(inplace=True),
+		)
+		self.encoder_pos = SoftPositionEmbed(input_dim=4, hidden_size=hid_dim, resolution=resolution)
+		enc_shape = (resolution[0], resolution[1], hid_dim)
+		self.dense = nn.Sequential(
+			nn.LayerNorm(np.product(enc_shape)),
+			nn.Linear(in_features=np.product(enc_shape), out_features=512),
+			nn.ReLU(),
+			nn.Linear(in_features=512, out_features=slot_dim)
+		)
+		self.preprocess = PixelPreprocess()
+
+	def slot_encode(self, x: torch.Tensor):
+		x = self.preprocess(x)
+		x = self.conv(x)
+		x = x.permute(0, 2, 3, 1)
+		x = self.encoder_pos(x)
+		x = torch.flatten(x, 1, 2)
+		return x
+
+	def forward(self, x: torch.Tensor):
+		x = self.preprocess(x)
+		x = self.conv(x)
+		x = x.permute(0, 2, 3, 1)
+		x = self.encoder_pos(x)
+		x = rearrange(x, 'b h w d -> b (h w d)')
+		x = self.dense(x)
+		return x
+
+
+class SlotDecoder(nn.Module):
+	def __init__(self, hid_dim: int, resolution: Tuple[int, int] = (8, 8), slot_dim: int = 64):
+		super().__init__()
+		self.conv = nn.Sequential(
+			nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(2, 2), padding=2, output_padding=1), nn.ReLU(inplace=True),
+			nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(2, 2), padding=2, output_padding=1), nn.ReLU(inplace=True),
+			nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(2, 2), padding=2, output_padding=1), nn.ReLU(inplace=True),
+			nn.ConvTranspose2d(hid_dim, 4, 3, stride=(1, 1), padding=1)
+		)
+		self.decoder_initial_size = (8, 8)
+		self.decoder_pos = SoftPositionEmbed(input_dim=4, hidden_size=hid_dim, resolution=self.decoder_initial_size)
+		self.resolution = resolution
+
+		self.de_dense = nn.Sequential(
+			nn.Linear(slot_dim, 512),
+			nn.ReLU(),
+			nn.Linear(512, hid_dim * resolution[0] * resolution[1])
+		)	
+
+	def slot_decode(self, z_hat: torch.Tensor):
+		b, n, d = z_hat.shape
+		z_hat = z_hat.reshape(b * n, d)[:, None, None, :].repeat(1, *self.resolution, 1)  # (b*n, h, w, d)
+		z_hat = self.decoder_pos(z_hat)
+		z_hat = rearrange(z_hat, '(b n) h w d -> (b n) d h w', b=b, n=n, d=d)
+		outs = self.conv(z_hat)  # (batch * n_slots, channels, h, w)
+		recons, masks = rearrange(outs, '(b n) d h w -> b n d h w', b=b, n=n).split([3, 1], dim=2)
+		# normalize alpha masks over slots
+		masks = F.softmax(masks, dim=1)
+		recon_combined = torch.sum(recons * masks, dim=1)  # recombine into image using masks
+		return recon_combined, masks
+
+	def forward(self, z_hat: torch.Tensor):
+		z_hat = self.de_dense(z_hat)
+		z_hat = rearrange(z_hat, '... (h w d) -> ... h w d', h=self.resolution[0], w=self.resolution[1])
+		
+		print(z_hat.shape)
+
+class SoftPositionEmbed(nn.Module):
+	def __init__(self, input_dim: int, hidden_size: int, resolution: Tuple[int, int]):
+		super(SoftPositionEmbed, self).__init__()
+		self.linear = nn.Linear(input_dim, hidden_size)
+		self.grid = torch.from_numpy(build_grid(resolution))
+		self.grid = self.grid.requires_grad_(False).cuda()
+
+	def forward(self, inputs: torch.Tensor):
+		return inputs + self.linear(self.grid)
 
 class Ensemble(nn.Module):
 	"""
@@ -160,7 +254,13 @@ def enc(cfg, out={}):
 		if k == 'state':
 			out[k] = mlp(cfg.obs_shape[k][0] + cfg.task_dim, max(cfg.num_enc_layers-1, 1)*[cfg.enc_dim], cfg.latent_dim, act=SimNorm(cfg))
 		elif k == 'rgb':
-			out[k] = conv(cfg.obs_shape[k], cfg.num_channels, act=SimNorm(cfg))
+			if cfg.slot_ae:
+				res = (cfg.obs_shape[k][1], cfg.obs_shape[k][2])  # (H, W)
+				inp_channel = cfg.obs_shape[k][0]
+				slot_channels = 8
+				out[k] = SlotEncoder(resolution=res, inp_channel=inp_channel, hid_dim=slot_channels, slot_dim=cfg.latent_dim)
+			else:
+				out[k] = conv(cfg.obs_shape[k], cfg.num_channels, act=SimNorm(cfg))
 		else:
 			raise NotImplementedError(f"Encoder for observation type {k} not implemented.")
 	return nn.ModuleDict(out)
@@ -275,7 +375,12 @@ def dec(cfg, out={}):
 		if k == 'state':
 			out[k] = mlp(cfg.latent_dim, max(cfg.num_enc_layers-1, 1)*[cfg.enc_dim], cfg.obs_shape[k][0])
 		elif k == 'rgb':
-			out[k] = deconv(cfg.obs_shape[k], cfg.latent_dim, cfg.num_channels)
+			if cfg.slot_ae:
+				res = (cfg.obs_shape[k][1], cfg.obs_shape[k][2])  # (H, W)
+				slot_channels = 8
+				out[k] = SlotDecoder(hid_dim=slot_channels, resolution=res, slot_dim=cfg.latent_dim)  # Or change resolution if needed
+			else:
+				out[k] = deconv(cfg.obs_shape[k], cfg.latent_dim, cfg.num_channels)
 		else:
 			raise NotImplementedError(f"Decoder for observation type {k} not implemented.")
 	return nn.ModuleDict(out)
