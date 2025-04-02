@@ -251,6 +251,7 @@ class TDMPC2(torch.nn.Module):
 		# Compute targets
 		with torch.no_grad():
 			next_z = self.model.encode(obs[1:], task)
+			# dummy = self.model.decode(next_z)
 			td_targets = self._td_target(next_z, reward, task)
 
 		# Prepare for update
@@ -271,6 +272,14 @@ class TDMPC2(torch.nn.Module):
 		qs = self.model.Q(_zs, action, task, return_type='all')
 		reward_preds = self.model.reward(_zs, action, task)
 
+
+		# Reconstruction predictions and loss
+		recon_loss = 0
+		if hasattr(self.model, 'decode'):  # Safety check
+			recon_obs = self.model.decode(_zs)
+			target_obs = obs[:-1]/255  # match timesteps with _zs
+			recon_loss = F.mse_loss(recon_obs, target_obs)  # or other loss like BCE for binary images
+
 		# Compute losses
 		reward_loss, value_loss = 0, 0
 		for t, (rew_pred_unbind, rew_unbind, td_targets_unbind, qs_unbind) in enumerate(zip(reward_preds.unbind(0), reward.unbind(0), td_targets.unbind(0), qs.unbind(1))):
@@ -281,10 +290,13 @@ class TDMPC2(torch.nn.Module):
 		consistency_loss = consistency_loss / self.cfg.horizon
 		reward_loss = reward_loss / self.cfg.horizon
 		value_loss = value_loss / (self.cfg.horizon * self.cfg.num_q)
+		recon_loss = recon_loss / self.cfg.horizon
+		
 		total_loss = (
 			self.cfg.consistency_coef * consistency_loss +
 			self.cfg.reward_coef * reward_loss +
-			self.cfg.value_coef * value_loss
+			self.cfg.value_coef * value_loss +
+			self.cfg.recon_coef * recon_loss
 		)
 
 		# Update model
@@ -305,6 +317,7 @@ class TDMPC2(torch.nn.Module):
 			"consistency_loss": consistency_loss,
 			"reward_loss": reward_loss,
 			"value_loss": value_loss,
+			"recon_loss": recon_loss,
 			"total_loss": total_loss,
 			"grad_norm": grad_norm,
 		})

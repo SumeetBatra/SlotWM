@@ -4,6 +4,8 @@ import torch.nn.functional as F
 from tensordict import from_modules
 from copy import deepcopy
 
+from einops import rearrange
+
 
 class Ensemble(nn.Module):
 	"""
@@ -217,3 +219,63 @@ def api_model_conversion(target_state_dict, source_state_dict):
 	source_state_dict.update(new_state_dict)
 
 	return source_state_dict
+
+
+
+
+def deconv(out_shape, latent_dim, num_channels, act=None):
+	"""
+	Transposed convolutional decoder that reconstructs an image
+	with shape `out_shape` from a latent vector.
+	Supports arbitrary output resolutions.
+	"""
+	assert len(out_shape) == 3, f"Expected shape (C, H, W), got {out_shape}"
+	C, H, W = out_shape
+
+	layers = [
+		nn.Linear(latent_dim, num_channels * 8 * 8), nn.ReLU(inplace=False),
+		nn.Unflatten(1, (num_channels, 8, 8)),
+		nn.ConvTranspose2d(num_channels, num_channels, 3, stride=1), nn.ReLU(inplace=False),
+		nn.ConvTranspose2d(num_channels, num_channels, 3, stride=2, padding=1, output_padding=1), nn.ReLU(inplace=False),
+		nn.ConvTranspose2d(num_channels, num_channels, 4, stride=2, padding=1), nn.ReLU(inplace=False),
+		nn.ConvTranspose2d(num_channels, C, 4, stride=2, padding=1)  # output: (B, C, H?, W?)
+	]
+
+	model = nn.Sequential(*layers)
+
+	class ResizeWrapper(nn.Module):
+		def __init__(self, model, target_hw):
+			super().__init__()
+			self.model = model
+			self.target_hw = target_hw
+
+		def forward(self, z):
+			reshaped = False
+			if len(z.shape) > 2:
+				# add all previous dimensions to the batch dimension
+				b1, b2 = z.shape[0], z.shape[1]
+				z = rearrange(z, 'b1 b2 ... -> (b1 b2) ...')
+				reshaped = True
+			# run through model
+			x = self.model(z)
+			x = F.interpolate(x, size=self.target_hw, mode='bilinear', align_corners=False)
+			if reshaped:
+				# reshape back to original shape
+				x = rearrange(x, '(b1 b2) ... -> b1 b2 ...', b1=b1, b2=b2)
+			return x
+
+	return ResizeWrapper(model, target_hw=(H, W))
+
+
+def dec(cfg, out={}):
+	"""
+	Returns a dictionary of decoders that reconstruct original observations from latent states.
+	"""
+	for k in cfg.obs_shape.keys():
+		if k == 'state':
+			out[k] = mlp(cfg.latent_dim, max(cfg.num_enc_layers-1, 1)*[cfg.enc_dim], cfg.obs_shape[k][0])
+		elif k == 'rgb':
+			out[k] = deconv(cfg.obs_shape[k], cfg.latent_dim, cfg.num_channels)
+		else:
+			raise NotImplementedError(f"Decoder for observation type {k} not implemented.")
+	return nn.ModuleDict(out)

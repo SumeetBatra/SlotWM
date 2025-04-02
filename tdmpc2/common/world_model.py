@@ -23,6 +23,7 @@ class WorldModel(nn.Module):
 			for i in range(len(cfg.tasks)):
 				self._action_masks[i, :cfg.action_dims[i]] = 1.
 		self._encoder = layers.enc(cfg)
+		self._decoder = layers.dec(cfg)
 		self._dynamics = layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], cfg.latent_dim, act=layers.SimNorm(cfg))
 		self._reward = layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1))
 		self._pi = layers.mlp(cfg.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], 2*cfg.action_dim)
@@ -106,7 +107,16 @@ class WorldModel(nn.Module):
 			obs = self.task_emb(obs, task)
 		if self.cfg.obs == 'rgb' and obs.ndim == 5:
 			return torch.stack([self._encoder[self.cfg.obs](o) for o in obs])
-		return self._encoder[self.cfg.obs](obs)
+		encoding = self._encoder[self.cfg.obs](obs)
+		# dummy = self._decoder[self.cfg.obs](encoding)
+		return encoding
+
+	def decode(self, z):
+		"""
+		Reconstructs observation from latent state `z` using the decoder
+		corresponding to the observation type specified in `self.cfg.obs`.
+		"""
+		return self._decoder[self.cfg.obs](z)
 
 	def next(self, z, a, task):
 		"""
