@@ -8,6 +8,58 @@ from tensordict import TensorDict
 from tensordict.nn import TensorDictParams
 
 
+
+class Predictor(nn.Module):
+    """Base class for a predictor based on slot_embs."""
+
+    def forward(self, x):
+        raise NotImplementedError
+
+    def burnin(self, x):
+        pass
+
+    def reset(self):
+        pass
+
+class TransformerPredictor(Predictor):
+    """Transformer encoder with input/output projection."""
+
+    def __init__(
+        self,
+        input_dim=518,
+        output_dim=518,
+        d_model=128,
+        num_layers=1,
+        num_heads=4,
+        ffn_dim=256,
+        norm_first=True,
+    ):
+        super().__init__()
+
+        self.input_proj = nn.Linear(input_dim, d_model)
+        self.output_proj = nn.Linear(d_model, output_dim)
+
+        transformer_enc_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=num_heads,
+            dim_feedforward=ffn_dim,
+            norm_first=norm_first,
+            batch_first=True,
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer=transformer_enc_layer,
+            num_layers=num_layers,
+        )
+
+    def forward(self, x):
+        # x: (b, 518)
+        x = x.unsqueeze(1)               # (b, 1, 518)
+        x = self.input_proj(x)           # (b, 1, d_model)
+        x = self.transformer_encoder(x)  # (b, 1, d_model)
+        x = self.output_proj(x)          # (b, 1, output_dim)
+        return x.squeeze(1)              # (b, output_dim)
+	
+	
 class WorldModel(nn.Module):
 	"""
 	TD-MPC2 implicit world model architecture.
@@ -34,7 +86,12 @@ class WorldModel(nn.Module):
 			else:
 				self.latent = slot_model
 
-		self._dynamics = layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], cfg.latent_dim, act=layers.SimNorm(cfg))
+		# self._dynamics = layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], cfg.latent_dim, act=layers.SimNorm(cfg))
+		self._dynamics = TransformerPredictor(
+			input_dim=cfg.latent_dim + cfg.action_dim + cfg.task_dim,
+			output_dim=cfg.latent_dim,
+			d_model=cfg.mlp_dim,
+		)
 		self._reward = layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1))
 		self._pi = layers.mlp(cfg.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], 2*cfg.action_dim)
 		self._Qs = layers.Ensemble([layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), dropout=cfg.dropout) for _ in range(cfg.num_q)])
