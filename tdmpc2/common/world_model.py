@@ -7,57 +7,58 @@ from common import layers, math, init, slot_attention
 from tensordict import TensorDict
 from tensordict.nn import TensorDictParams
 
+from einops import rearrange
 
 
 class Predictor(nn.Module):
-    """Base class for a predictor based on slot_embs."""
+	"""Base class for a predictor based on slot_embs."""
 
-    def forward(self, x):
-        raise NotImplementedError
+	def forward(self, x):
+		raise NotImplementedError
 
-    def burnin(self, x):
-        pass
+	def burnin(self, x):
+		pass
 
-    def reset(self):
-        pass
+	def reset(self):
+		pass
 
 class TransformerPredictor(Predictor):
-    """Transformer encoder with input/output projection."""
+	"""Transformer encoder with input/output projection."""
 
-    def __init__(
-        self,
-        input_dim=518,
-        output_dim=518,
-        d_model=128,
-        num_layers=1,
-        num_heads=4,
-        ffn_dim=256,
-        norm_first=True,
-    ):
-        super().__init__()
+	def __init__(
+		self,
+		input_dim=518,
+		output_dim=518,
+		d_model=128,
+		num_layers=1,
+		num_heads=4,
+		ffn_dim=256,
+		norm_first=True,
+	):
+		super().__init__()
 
-        self.input_proj = nn.Linear(input_dim, d_model)
-        self.output_proj = nn.Linear(d_model, output_dim)
+		self.input_proj = nn.Linear(input_dim, d_model)
+		self.output_proj = nn.Linear(d_model, output_dim)
 
-        transformer_enc_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=num_heads,
-            dim_feedforward=ffn_dim,
-            norm_first=norm_first,
-            batch_first=True,
-        )
-        self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer=transformer_enc_layer,
-            num_layers=num_layers,
-        )
+		transformer_enc_layer = nn.TransformerEncoderLayer(
+			d_model=d_model,
+			nhead=num_heads,
+			dim_feedforward=ffn_dim,
+			norm_first=norm_first,
+			batch_first=True,
+		)
+		self.transformer_encoder = nn.TransformerEncoder(
+			encoder_layer=transformer_enc_layer,
+			num_layers=num_layers,
+		)
 
-    def forward(self, x):
-        # x: (b, 518)
-        x = x.unsqueeze(1)               # (b, 1, 518)
-        x = self.input_proj(x)           # (b, 1, d_model)
-        x = self.transformer_encoder(x)  # (b, 1, d_model)
-        x = self.output_proj(x)          # (b, 1, output_dim)
-        return x.squeeze(1)              # (b, output_dim)
+	def forward(self, x):
+		# x: (b, 518)
+		x = x.unsqueeze(1)			   # (b, 1, 518)
+		x = self.input_proj(x)		   # (b, 1, d_model)
+		x = self.transformer_encoder(x)  # (b, 1, d_model)
+		x = self.output_proj(x)		  # (b, 1, output_dim)
+		return x.squeeze(1)			  # (b, output_dim)
 	
 	
 class WorldModel(nn.Module):
@@ -77,10 +78,9 @@ class WorldModel(nn.Module):
 		self._encoder = layers.enc(cfg)
 		self._decoder = layers.dec(cfg)
 		if cfg.slot_ae:
-			num_slots = 8
-			slot_dim = 16
+			num_slots = cfg.num_slots
 			self.adaptive = False
-			slot_model = slot_attention.SlotAttention(num_slots=num_slots, dim=slot_dim)
+			slot_model = slot_attention.SlotAttention(num_slots=num_slots, dim=cfg.slot_dim)
 			if self.adaptive:
 				self.latent = slot_attention.AdaptiveSlotWrapper(slot_model)
 			else:
@@ -173,16 +173,29 @@ class WorldModel(nn.Module):
 		if self.cfg.multitask:
 			obs = self.task_emb(obs, task)
 		if self.cfg.obs == 'rgb' and obs.ndim == 5:
-			return torch.stack([self._encoder[self.cfg.obs](o) for o in obs])
-		encoding = self._encoder[self.cfg.obs](obs)
-		# dummy = self._decoder[self.cfg.obs](encoding)
-		return encoding
+			slots = []
+			for o in obs:
+				encoding = self._encoder[self.cfg.obs](o)
+				slot, keep_slots = self.latent(encoding)
+				slot = rearrange(slot, 'b n d -> b (n d)')
+				slots.append(slot)
+			
+			slots = torch.stack(slots)
+		else:
+			encoding = self._encoder[self.cfg.obs](obs)
+			slots, keep_slots = self.latent(encoding)
+			slots = rearrange(slots, 'b n d -> b (n d)')
+		# return encoding
+		
+		return slots
 
 	def decode(self, z):
 		"""
 		Reconstructs observation from latent state `z` using the decoder
 		corresponding to the observation type specified in `self.cfg.obs`.
 		"""
+		n = self.cfg.num_slots
+		z = rearrange(z, 'b (n d) -> b n d', n=n)
 		return self._decoder[self.cfg.obs](z)
 
 	def next(self, z, a, task):

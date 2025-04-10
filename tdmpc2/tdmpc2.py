@@ -7,6 +7,7 @@ from common.world_model import WorldModel
 from common.layers import api_model_conversion
 from tensordict import TensorDict
 
+from einops import rearrange
 
 class TDMPC2(torch.nn.Module):
 	"""
@@ -251,11 +252,24 @@ class TDMPC2(torch.nn.Module):
 		# Reconstruction predictions and loss
 		recon_loss = 0
 		if hasattr(self.model, 'decode'):  # Safety check
-			raw_enc = self.model.encode(obs, task)
-			recon_obs = self.model.decode(raw_enc)
-			target_obs = obs/255  # match timesteps with _zs
-			recon_loss = F.mse_loss(recon_obs, target_obs)  # or other loss like BCE for binary images
+			if not self.cfg.slot_ae:
+				raw_enc = self.model.encode(obs, task)
+				recon_obs = self.model.decode(raw_enc)
+				target_obs = obs/255  # match timesteps with _zs
+				recon_loss = F.mse_loss(recon_obs, target_obs)  # or other loss like BCE for binary images
+			else:
+				z = self.model.encode(obs, task)
 
+				b1, b2, b3 = z.shape
+				z = rearrange(z, 'b1 b2 b3 -> (b1 b2) b3')
+				recon, masks = self.model.decode(z)
+				recon = rearrange(recon, '(b1 b2) ... -> b1 b2 ...', b1=b1, b2=b2)
+				masks = rearrange(masks, '(b1 b2) ... -> b1 b2 ...', b1=b1, b2=b2)
+				recon_loss = F.binary_cross_entropy_with_logits(
+					recon, 
+					target=obs/255, 
+					reduction='none'
+					).sum((1, 2, 3)).mean()
 		return recon_loss
 	
 	def _update(self, obs, action, reward, task=None):
