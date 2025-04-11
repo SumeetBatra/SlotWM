@@ -56,20 +56,23 @@ num_enc_layers: 2
 enc_dim: 256
 num_channels: 32
 mlp_dim: 512
-latent_dim: 256 # has to be slot_dim * num_slots
+latent_dim: 128 # has to be slot_dim * num_slots
 task_dim: 96
 num_q: 5
 dropout: 0.01
 simnorm_dim: 8
-slot_ae: True
-slot_dim: 32
+
+# slot WM
+slot_wm: True
 num_slots: 8
+slot_dim: 16
+adaptive: False
 
 # logging
 wandb_project: slot-wm
 wandb_entity: qdrl
 wandb_silent: false
-enable_wandb: false
+enable_wandb: true
 wandb_group: maniskill
 save_csv: true
 

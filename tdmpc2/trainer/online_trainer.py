@@ -74,6 +74,10 @@ class OnlineTrainer(Trainer):
 
 			# Reset environment
 			if done:
+				if self.cfg.slot_wm and self._step % self.cfg.eval_freq == 0 and self._step > self.cfg.seed_steps:
+					# visualize masks and reconstructions for SlotWM
+					batch, *_ = self.buffer.sample()
+					self.agent.visualize_reconstructions(batch=batch, task=None, step=self._step)
 				if eval_next:
 					eval_metrics = self.eval()
 					eval_metrics.update(self.common_metrics())

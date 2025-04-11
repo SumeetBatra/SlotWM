@@ -1,53 +1,52 @@
 import torch
 import torch.nn as nn
 
-from slot_tdmpc.models.slot_ae import SlotDecoder, SlotEncoder
+from einops import rearrange
+from slot_tdmpc.common import layers, math, init
 from slot_tdmpc.models.wm_components import *
-from slot_tdmpc.common import math
-from tensordict import TensorDict, TensorDictParams
+from slot_tdmpc.models.slot_ae import SlotAttention, AdaptiveSlotWrapper
+from tensordict import TensorDict
 from tensordict.nn import TensorDictParams
-from typing import Dict, Any
+from copy import deepcopy
+
 
 
 class SlotWorldModel(nn.Module):
-    def __init__(self, cfg: Dict[str, Any]):
-        super(SlotWorldModel, self).__init__()
+    """
+    TD-MPC2 implicit world model architecture.
+    Can be used for both single-task and multi-task experiments.
+    """
+
+    def __init__(self, cfg):
+        super().__init__()
         self.cfg = cfg
-        self._detach_Qs_params = None
-        self._target_Qs_params = None
-        self._detach_Qs = None
-        self._target_Qs = None
         if cfg.multitask:
-            # TODO: can we use something more informative than random embeddings ?
-            # ex. maybe we can use embeddings of the goal image as the task embedding
-            # this will potentially help the agent generalize quicker to new tasks in the post-training phase
-            # because there is a lot of useful, reusable information in an image
             self._task_emb = nn.Embedding(len(cfg.tasks), cfg.task_dim, max_norm=1)
             self.register_buffer("_action_masks", torch.zeros(len(cfg.tasks), cfg.action_dim))
             for i in range(len(cfg.tasks)):
                 self._action_masks[i, :cfg.action_dims[i]] = 1.
+        self._encoder = layers.enc(cfg)
+        self._decoder = layers.dec(cfg)
+        self.latent = SlotAttention(num_slots=cfg.num_slots, dim=cfg.slot_dim)
+        if cfg.adaptive:
+            self.latent = AdaptiveSlotWrapper(self.latent)
 
-        # latent model components
-        # TODO: need to make slot assignments deterministic, otherwise the latent repr will have random permutations each time
-        self._encoder = SlotEncoder(resolution=(64, 64), hid_dim=64, slot_dim=cfg.slot_dim)
-        self._decoder = SlotDecoder(hid_dim=64)
+        self._dynamics = TransformerPredictor(
+            input_dim=cfg.latent_dim + cfg.action_dim + cfg.task_dim,
+            output_dim=cfg.latent_dim,
+            d_model=cfg.mlp_dim,
+        )
+        self._reward = layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2 * [cfg.mlp_dim],
+                                  max(cfg.num_bins, 1))
+        self._pi = layers.mlp(cfg.latent_dim + cfg.task_dim, 2 * [cfg.mlp_dim], 2 * cfg.action_dim)
+        self._Qs = layers.Ensemble([layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2 * [cfg.mlp_dim],
+                                               max(cfg.num_bins, 1), dropout=cfg.dropout) for _ in range(cfg.num_q)])
+        self.apply(init.weight_init)
+        init.zero_([self._reward[-1].weight, self._Qs.params["2", "weight"]])
 
-        # TODO: we can do smth better than an mlp dynamics model
-        # for example a transformer or RNN to capture short / long range temporal dependencies
-        self._dynamics = MLPDynamicsModel(latent_dim=cfg.latent_dim, action_dim=cfg.action_dim, hidden_dim=cfg.hidden_dim)
-        self._reward = RewardModel(latent_dim=cfg.latent_dim, action_dim=cfg.action_dim, hidden_dim=cfg.hidden_dim, task_dim=cfg.task_dim)
-
-        # actor critic components
-        self._pi = Actor(latent_dim=cfg.latent_dim, action_dim=cfg.action_dim, hidden_dim=cfg.hidden_dim, task_dim=cfg.task_dim)
-        self._Qs = Ensemble([
-            Critic(latent_dim=cfg.latent_dim, action_dim=cfg.action_dim, hidden_dim=cfg.hidden_dim, task_dim=cfg.task_dim)
-            for _ in range(cfg.num_q)
-        ])
-
-        self.apply(weight_init)
-        zero_([self._reward[-1].weight, self._Qs.params["2", "weight"]])
         self.register_buffer("log_std_min", torch.tensor(cfg.log_std_min))
         self.register_buffer("log_std_dif", torch.tensor(cfg.log_std_max) - self.log_std_min)
+        self.init()
 
     def init(self):
         # Create params
@@ -67,7 +66,7 @@ class SlotWorldModel(nn.Module):
         self._target_Qs.__dict__["params"] = self._target_Qs_params
 
     def __repr__(self):
-        repr = 'Slot World Model\n'
+        repr = 'TD-MPC2 World Model\n'
         modules = ['Encoder', 'Dynamics', 'Reward', 'Policy prior', 'Q-functions']
         for i, m in enumerate([self._encoder, self._dynamics, self._reward, self._pi, self._Qs]):
             repr += f"{modules[i]}: {m}\n"
@@ -97,38 +96,87 @@ class SlotWorldModel(nn.Module):
         """
         self._target_Qs_params.lerp_(self._detach_Qs_params, self.cfg.tau)
 
-    def task_emb(self, latent: torch.Tensor, task: Any):
-        # TODO: more informative representation for task ex. goal image
-        '''
-        Instead of attaching the task emb to the input, we attach it to the latent variable
-        The world model should be task agnostic and build a general "intuitive physics" model of the world,
-        regardless of task. Only the actor and critic should be task conditioned
-        :param latent: (N x D) latent repr of the input
-        :param task: task specifier
-        '''
+    def task_emb(self, x, task):
+        """
+        Continuous task embedding for multi-task experiments.
+        Retrieves the task embedding for a given task ID `task`
+        and concatenates it to the input `x`.
+        """
         if isinstance(task, int):
-            task = torch.tensor([task], device=latent.device)
+            task = torch.tensor([task], device=x.device)
         emb = self._task_emb(task.long())
-        return torch.cat([latent, emb], dim=-1)
+        if x.ndim == 3:
+            emb = emb.unsqueeze(0).repeat(x.shape[0], 1, 1)
+        elif emb.shape[0] == 1:
+            emb = emb.repeat(x.shape[0], 1)
+        return torch.cat([x, emb], dim=-1)
 
-    def encode(self, obs: torch.Tensor):
+    def encode(self, obs, task):
+        """
+        Encodes an observation into its latent representation.
+        This implementation assumes a single state-based observation.
+        """
+        if self.cfg.multitask:
+            obs = self.task_emb(obs, task)
         if self.cfg.obs == 'rgb' and obs.ndim == 5:
-            # encode history of obs and stack
-            return torch.stack([self._encoder(o) for o in obs])
-        return self._encoder(obs)
+            slots = []
+            for o in obs:
+                encoding = self._encoder[self.cfg.obs](o)
+                slot, keep_slots = self.latent(encoding)
+                slot = rearrange(slot, 'b n d -> b (n d)')
+                slots.append(slot)
 
-    def next(self, z: torch.Tensor, a: torch.Tensor):
-        '''
-        Predict next latent state given current latent state and action
-        '''
-        return self._dynamics(action=a, latent=z)
+            slots = torch.stack(slots)
+        else:
+            encoding = self._encoder[self.cfg.obs](obs)
+            slots, keep_slots = self.latent(encoding)
+            slots = rearrange(slots, 'b n d -> b (n d)')
+        # return encoding
 
-    def reward(self, z: torch.Tensor, a: torch.Tensor, task: Any = None):
+        return slots
+
+    def decode(self, z):
+        """
+        Reconstructs observation from latent state `z` using the decoder
+        corresponding to the observation type specified in `self.cfg.obs`.
+        """
+        n = self.cfg.num_slots
+        z = rearrange(z, 'b (n d) -> b n d', n=n)
+        return self._decoder[self.cfg.obs](z)
+
+    def next(self, z, a, task):
+        """
+        Predicts the next latent state given the current latent state and action.
+        """
         if self.cfg.multitask:
             z = self.task_emb(z, task)
-        return self._reward(latent=z, action=a)
+        z = torch.cat([z, a], dim=-1)
+        return self._dynamics(z)
 
-    def pi(self, z: torch.Tensor, task: Any):
+    def next(self, z, a, task):
+        """
+        Predicts the next latent state given the current latent state and action.
+        """
+        if self.cfg.multitask:
+            z = self.task_emb(z, task)
+        z = torch.cat([z, a], dim=-1)
+        return self._dynamics(z)
+
+    def reward(self, z, a, task):
+        """
+        Predicts instantaneous (single-step) reward.
+        """
+        if self.cfg.multitask:
+            z = self.task_emb(z, task)
+        z = torch.cat([z, a], dim=-1)
+        return self._reward(z)
+
+    def pi(self, z, task):
+        """
+        Samples an action from the policy prior.
+        The policy prior is a Gaussian distribution with
+        mean and (log) std predicted by a neural network.
+        """
         if self.cfg.multitask:
             z = self.task_emb(z, task)
 
@@ -165,7 +213,7 @@ class SlotWorldModel(nn.Module):
         })
         return action, info
 
-    def Q(self, z: torch.Tensor, a: torch.Tensor, task: Any, return_type='min', target=False, detach=False):
+    def Q(self, z, a, task, return_type='min', target=False, detach=False):
         """
         Predict state-action value.
         `return_type` can be one of [`min`, `avg`, `all`]:

@@ -1,9 +1,13 @@
 import torch
 import torch.nn.functional as F
+import einops
+import wandb
 
 from common import math
 from common.scale import RunningScale
 from common.world_model import WorldModel
+from slot_tdmpc.models.slot_world_model import SlotWorldModel
+from slot_tdmpc.common.metrics import log_reconstruction_metrics
 from common.layers import api_model_conversion
 from tensordict import TensorDict
 
@@ -20,7 +24,7 @@ class TDMPC2(torch.nn.Module):
 		super().__init__()
 		self.cfg = cfg
 		self.device = torch.device('cuda:0')
-		self.model = WorldModel(cfg).to(self.device)
+		self.model = WorldModel(cfg).to(self.device) if not cfg.slot_wm else SlotWorldModel(cfg).to(self.device)
 		self.optim = torch.optim.Adam([
 			{'params': self.model._encoder.parameters(), 'lr': self.cfg.lr*self.cfg.enc_lr_scale},
 			{'params': self.model._dynamics.parameters()},
@@ -252,7 +256,7 @@ class TDMPC2(torch.nn.Module):
 		# Reconstruction predictions and loss
 		recon_loss = 0
 		if hasattr(self.model, 'decode'):  # Safety check
-			if not self.cfg.slot_ae:
+			if not self.cfg.slot_wm:
 				raw_enc = self.model.encode(obs, task)
 				recon_obs = self.model.decode(raw_enc)
 				target_obs = obs/255  # match timesteps with _zs
@@ -359,3 +363,36 @@ class TDMPC2(torch.nn.Module):
 			kwargs["task"] = task
 		torch.compiler.cudagraph_mark_step_begin()
 		return self._update(obs, action, reward, **kwargs)
+
+
+	def visualize_reconstructions(self, batch: torch.Tensor, task, step: int):
+		'''
+		only used for slot-WM
+		:param batch: (T, B, C, H, W)
+		:param task: task embedding
+		:param step
+		'''
+
+		z = self.model.encode(batch, task)
+
+		b1, b2, b3 = z.shape
+		z = rearrange(z, 'b1 b2 b3 -> (b1 b2) b3')
+		recon, masks = self.model.decode(z)
+		recon = rearrange(recon, '(b1 b2) ... -> b1 b2 ...', b1=b1, b2=b2)
+		masks = rearrange(masks, '(b1 b2) ... -> b1 b2 ...', b1=b1, b2=b2)
+
+		t = 0
+		aux = dict(x_true=batch[t, :, :3], x_hat_logits=recon[t, :, :3])
+		log_reconstruction_metrics(aux, step, use_wandb=True)
+
+		# visualize a batch of masks and reconstructions
+		num_samples, num_slots = 16, self.cfg.num_slots
+		recon, masks = recon[t, :num_samples, :3], masks[t, :num_samples]
+		imgs = [F.sigmoid(recon[:num_samples])]
+		for slot_i in range(num_slots):
+			mask_i = masks[:, slot_i]
+			img = F.sigmoid(recon * mask_i + (1.0 - mask_i))
+			imgs.append(img)
+		imgs = torch.stack(imgs)
+		image = einops.rearrange(imgs, 's b c h w -> (b h) (s w) c')
+		wandb.log({f'Slot Reconstructions': wandb.Image(image.detach().cpu().numpy()), 'step': step})

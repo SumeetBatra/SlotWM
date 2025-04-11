@@ -113,3 +113,55 @@ class Ensemble(nn.Module):
 
 	def __repr__(self):
 		return f'Vectorized {len(self)}x ' + self._repr
+
+
+class Predictor(nn.Module):
+    """Base class for a predictor based on slot_embs."""
+
+    def forward(self, x):
+        raise NotImplementedError
+
+    def burnin(self, x):
+        pass
+
+    def reset(self):
+        pass
+
+
+class TransformerPredictor(Predictor):
+    """Transformer encoder with input/output projection."""
+
+    def __init__(
+            self,
+            input_dim=518,
+            output_dim=518,
+            d_model=128,
+            num_layers=1,
+            num_heads=4,
+            ffn_dim=256,
+            norm_first=True,
+    ):
+        super().__init__()
+
+        self.input_proj = nn.Linear(input_dim, d_model)
+        self.output_proj = nn.Linear(d_model, output_dim)
+
+        transformer_enc_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=num_heads,
+            dim_feedforward=ffn_dim,
+            norm_first=norm_first,
+            batch_first=True,
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer=transformer_enc_layer,
+            num_layers=num_layers,
+        )
+
+    def forward(self, x):
+        # x: (b, 518)
+        x = x.unsqueeze(1)  # (b, 1, 518)
+        x = self.input_proj(x)  # (b, 1, d_model)
+        x = self.transformer_encoder(x)  # (b, 1, d_model)
+        x = self.output_proj(x)  # (b, 1, output_dim)
+        return x.squeeze(1)  # (b, output_dim)
