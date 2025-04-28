@@ -13,7 +13,7 @@ from termcolor import colored
 from common.parser import parse_cfg
 from common.seed import set_seed
 from common.buffer import Buffer
-from envs import make_env
+from envs import make_envs
 from tdmpc2 import TDMPC2
 from trainer.offline_trainer import OfflineTrainer
 from trainer.online_trainer import OnlineTrainer
@@ -49,13 +49,19 @@ def train(cfg: dict):
 	set_seed(cfg.seed)
 	print(colored('Work dir:', 'yellow', attrs=['bold']), cfg.work_dir)
 
+	env = make_envs(cfg, num_envs=cfg.num_envs)
+	video_path = cfg.work_dir / 'eval_video'
+	logger = Logger(cfg)
+	eval_env = make_envs(cfg, num_envs=cfg.num_eval_envs, video_path=video_path, is_eval=True, logger=logger)
+
 	trainer_cls = OfflineTrainer if cfg.multitask else OnlineTrainer
 	trainer = trainer_cls(
 		cfg=cfg,
-		env=make_env(cfg),
+		env=env,
+		eval_env=eval_env,
 		agent=TDMPC2(cfg),
 		buffer=Buffer(cfg),
-		logger=Logger(cfg),
+		logger=logger,
 	)
 	trainer.train()
 	print('\nTraining completed successfully')

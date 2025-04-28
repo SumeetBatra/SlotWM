@@ -25,6 +25,10 @@ try:
 	from envs.myosuite import make_env as make_myosuite_env
 except:
 	make_myosuite_env = missing_dependencies
+try:
+	from envs.maniskill3 import make_envs as make_maniskill3_vec_env
+except:
+	make_maniskill3_vec_env = missing_dependencies
 
 
 warnings.filterwarnings('ignore', category=DeprecationWarning)
@@ -51,29 +55,14 @@ def make_multitask_env(cfg):
 	return env
 	
 
-def make_env(cfg):
-	"""
-	Make an environment for TD-MPC2 experiments.
-	"""
-	gym.logger.set_level(40)
-	if cfg.multitask:
-		env = make_multitask_env(cfg)
+def make_envs(cfg, num_envs, video_path: str = None, is_eval=False, logger=None):
+	env = make_maniskill3_vec_env(cfg, num_envs, video_path, is_eval, logger)
 
-	else:
-		env = None
-		for fn in [make_dm_control_env, make_maniskill_env, make_metaworld_env, make_myosuite_env]:
-			try:
-				env = fn(cfg)
-			except ValueError:
-				pass
-		if env is None:
-			raise ValueError(f'Failed to make environment "{cfg.task}": please verify that dependencies are installed and that the task exists.')
-		env = TensorWrapper(env)
 	try: # Dict
-		cfg.obs_shape = {k: v.shape for k, v in env.observation_space.spaces.items()}
+		cfg.obs_shape = {k: v.shape[1:] for k, v in env.observation_space.spaces.items()}
 	except: # Box
-		cfg.obs_shape = {cfg.get('obs', 'state'): env.observation_space.shape}
-	cfg.action_dim = env.action_space.shape[0]
+		cfg.obs_shape = {cfg.get('obs', 'state'): env.observation_space.shape[1:]}
+	cfg.action_dim = env.action_space.shape[1]
 	cfg.episode_length = env.max_episode_steps
-	cfg.seed_steps = max(1000, 5*cfg.episode_length)
+	cfg.seed_steps = max(1000, cfg.num_envs * cfg.episode_length)
 	return env

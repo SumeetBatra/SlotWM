@@ -4,7 +4,7 @@ import torch.nn as nn
 from einops import rearrange
 from slot_tdmpc.common import layers, math, init
 from slot_tdmpc.models.wm_components import *
-from slot_tdmpc.models.slot_ae import SlotAttention, AdaptiveSlotWrapper
+from slot_tdmpc.models.slot_ae import SlotAttention, AdaptiveSlotWrapper, SlotEncoder, SlotDecoder
 from tensordict import TensorDict
 from tensordict.nn import TensorDictParams
 from copy import deepcopy
@@ -25,17 +25,16 @@ class SlotWorldModel(nn.Module):
             self.register_buffer("_action_masks", torch.zeros(len(cfg.tasks), cfg.action_dim))
             for i in range(len(cfg.tasks)):
                 self._action_masks[i, :cfg.action_dims[i]] = 1.
-        self._encoder = layers.enc(cfg)
-        self._decoder = layers.dec(cfg)
-        self.latent = SlotAttention(num_slots=cfg.num_slots, dim=cfg.slot_dim)
+        slot_attn = SlotAttention(num_slots=cfg.num_slots, dim=cfg.slot_dim)
         if cfg.adaptive:
-            self.latent = AdaptiveSlotWrapper(self.latent)
+            slot_attn = AdaptiveSlotWrapper(slot_attn)
+        res = (cfg.obs_shape['rgb'][1], cfg.obs_shape['rgb'][2])  # (H, W)
+        inp_channel = out_channel = cfg.obs_shape['rgb'][0]
+        slot_dim = cfg.slot_dim
+        self._encoder = SlotEncoder(resolution=res, inp_channel=inp_channel, hid_dim=slot_dim, slot_attn=slot_attn)
+        self._decoder = SlotDecoder(hid_dim=slot_dim, resolution=res, out_channel=out_channel)
 
-        self._dynamics = TransformerPredictor(
-            input_dim=cfg.latent_dim + cfg.action_dim + cfg.task_dim,
-            output_dim=cfg.latent_dim,
-            d_model=cfg.mlp_dim,
-        )
+        self._dynamics = TransformerPredictor(d_model=cfg.mlp_dim)
         self._reward = layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2 * [cfg.mlp_dim],
                                   max(cfg.num_bins, 1))
         self._pi = layers.mlp(cfg.latent_dim + cfg.task_dim, 2 * [cfg.mlp_dim], 2 * cfg.action_dim)
@@ -118,40 +117,22 @@ class SlotWorldModel(nn.Module):
         """
         if self.cfg.multitask:
             obs = self.task_emb(obs, task)
-        if self.cfg.obs == 'rgb' and obs.ndim == 5:
-            slots = []
-            for o in obs:
-                encoding = self._encoder[self.cfg.obs](o)
-                slot, keep_slots = self.latent(encoding)
-                slot = rearrange(slot, 'b n d -> b (n d)')
-                slots.append(slot)
+        if self.cfg.obs == 'rgb' and not self.cfg.include_state and obs.ndim == 5:
+            return torch.stack([self._encoder[self.cfg.obs](o) for o in obs])
+        elif self.cfg.obs == 'rgb' and self.cfg.include_state and isinstance(obs, dict):
+            return torch.cat([self._encoder[k](o) for k, o in obs.items()], dim=1)
+        elif self.cfg.obs == 'rgb' and self.cfg.include_state and isinstance(obs, TensorDict):
+            if obs.ndim == 2:
+                return torch.stack([torch.cat(self._encoder[k](o) for k, o in obs.items())], dim=1)
+        return self._encoder[self.cfg.obs](obs)
 
-            slots = torch.stack(slots)
-        else:
-            encoding = self._encoder[self.cfg.obs](obs)
-            slots, keep_slots = self.latent(encoding)
-            slots = rearrange(slots, 'b n d -> b (n d)')
-        # return encoding
-
-        return slots
-
-    def decode(self, z):
+    def decode(self, z: torch.Tensor):
         """
         Reconstructs observation from latent state `z` using the decoder
         corresponding to the observation type specified in `self.cfg.obs`.
+        :param z: slots of shape (B x num_slots x slot_dim)
         """
-        n = self.cfg.num_slots
-        z = rearrange(z, 'b (n d) -> b n d', n=n)
         return self._decoder[self.cfg.obs](z)
-
-    def next(self, z, a, task):
-        """
-        Predicts the next latent state given the current latent state and action.
-        """
-        if self.cfg.multitask:
-            z = self.task_emb(z, task)
-        z = torch.cat([z, a], dim=-1)
-        return self._dynamics(z)
 
     def next(self, z, a, task):
         """
