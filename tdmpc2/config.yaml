@@ -1,29 +1,22 @@
 defaults:
     - override hydra/launcher: submitit_local
 
-# maniskill environment
-task: PickCube-v1
-obs: rgb
-include_state: true
-render_mode: all
-render_size: 64
-control_mode: pd_ee_delta_pos
-eval_reconfiguration_frequency: 1
-env_type: gpu
-num_envs: 32
-num_eval_envs: 4
+# environment
+task: dog-run
+obs: state
+episodic: false
 
 # evaluation
 checkpoint: ???
-eval_episodes_per_env: 10
+eval_episodes: 10
 eval_freq: 50000
 
 # training
 steps: 10_000_000
-batch_size: 128
+batch_size: 256
 reward_coef: 0.1
 value_coef: 0.1
-recon_coef: 0.1
+termination_coef: 1
 consistency_coef: 20
 rho: 0.5
 lr: 3e-4
@@ -36,7 +29,6 @@ discount_max: 0.995
 buffer_size: 1_000_000
 exp_name: default
 data_dir: ???
-steps_per_update: 1
 
 # planning
 mpc: true
@@ -65,31 +57,21 @@ num_enc_layers: 2
 enc_dim: 256
 num_channels: 32
 mlp_dim: 512
-latent_dim: 512 # has to be slot_dim * num_slots
+latent_dim: 512
 task_dim: 96
 num_q: 5
 dropout: 0.01
 simnorm_dim: 8
-rgb_state_enc_dim: 64
-rgb_state_num_enc_layers: 1
-rgb_state_latent_dim: 64
-
-# slot WM
-slot_wm: False
-num_slots: 8
-slot_dim: 16
-adaptive: False
 
 # logging
-wandb_project: slot-wm
-wandb_entity: qdrl
+wandb_project: ???
+wandb_entity: ???
 wandb_silent: false
 enable_wandb: true
-wandb_group: maniskill
 save_csv: true
-setting_tag: none
 
 # misc
+compile: true
 save_video: true
 save_agent: true
 seed: 1
@@ -107,7 +89,3 @@ action_dims: ???
 episode_lengths: ???
 seed_steps: ???
 bin_size: ???
-save_video_local: true
-
-# speedups
-compile: False

@@ -56,3 +56,7 @@ dependencies:
     # MyoSuite:
     # - myosuite
     ####################
+    # Classic MuJoCo/Box2d:
+    # - swig
+    # - gymnasium[box2d]
+    ####################
